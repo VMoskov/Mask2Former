@@ -39,6 +39,9 @@ pip install -e .
 pip install git+https://github.com/cocodataset/panopticapi.git
 pip install git+https://github.com/mcordts/cityscapesScripts.git
 
+# or install detectron2 from pip (instead of the above chunk)
+pip install detectron2 -f https://dl.fbaipublicfiles.com/detectron2/wheels/cu111/torch1.9/index.html
+
 cd ..
 git clone git@github.com:facebookresearch/Mask2Former.git
 cd Mask2Former
