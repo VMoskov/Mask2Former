@@ -16,6 +16,7 @@ import copy
 import itertools
 import logging
 import os
+import onnx
 
 from collections import OrderedDict
 from typing import Any, Dict, List, Set
@@ -295,6 +296,62 @@ def setup(args):
     return cfg
 
 
+def export_onnx(model, cfg):
+    model.eval()
+    output_dir = './output_swin_t'
+    save_path = os.path.join(output_dir, 'model.onnx')
+
+    # Define input shape
+    H, W = cfg.INPUT.CROP.SIZE  # Ensure cropping is enabled in config
+    dummy_input = torch.randn(1, 3, H, W, device=model.device)  # Batch of 1
+
+    # Forward pass to get sample output
+    with torch.no_grad():
+        output_instances = model([{"image": dummy_input[0]}])[0]  # Assume batch size of 1
+
+    # Extract ONNX-compatible tensors
+    pred_masks = output_instances.pred_masks if hasattr(output_instances, "pred_masks") else None
+    pred_boxes = output_instances.pred_boxes.tensor if hasattr(output_instances, "pred_boxes") else None
+    scores = output_instances.scores if hasattr(output_instances, "scores") else None
+
+    # Convert outputs to tuple
+    onnx_outputs = tuple(x for x in [pred_masks, pred_boxes, scores] if x is not None)
+
+    # Define a wrapper to make the model ONNX-compatible
+    class ONNXWrapper(torch.nn.Module):
+        def __init__(self, model):
+            super().__init__()
+            self.model = model
+
+        def forward(self, x):
+            output_instances = self.model([{"image": x[0]}])[0]  # Process batch size 1
+            pred_masks = output_instances.pred_masks if hasattr(output_instances, "pred_masks") else torch.empty(0)
+            pred_boxes = output_instances.pred_boxes.tensor if hasattr(output_instances, "pred_boxes") else torch.empty(0)
+            scores = output_instances.scores if hasattr(output_instances, "scores") else torch.empty(0)
+            return pred_masks, pred_boxes, scores  # ONNX supports tuple outputs
+
+    wrapped_model = ONNXWrapper(model)
+
+    # Export to ONNX
+    torch.onnx.export(
+        wrapped_model,
+        (dummy_input,),  # Ensure its a tuple
+        save_path,
+        export_params=True,
+        opset_version=16,
+        do_constant_folding=True,
+        input_names=["input"],
+        output_names=["pred_masks", "pred_boxes", "scores"],
+    )
+
+    print(f"Model successfully exported to {save_path}")
+
+    # Validate ONNX model
+    onnx_model = onnx.load(save_path)
+    onnx.checker.check_model(onnx_model)
+    print("ONNX model is valid!")
+
+
 def main(args):
     cfg = setup(args)
 
@@ -303,6 +360,12 @@ def main(args):
         DetectionCheckpointer(model, save_dir=cfg.OUTPUT_DIR).resume_or_load(
             cfg.MODEL.WEIGHTS, resume=args.resume
         )
+
+        export_onnx_ = False  # needs to be changed manually
+        if export_onnx_:
+            export_onnx(model, cfg)
+            return  # Exit after exporting ONNX model (for now)
+
         res = Trainer.test(cfg, model)
         if cfg.TEST.AUG.ENABLED:
             res.update(Trainer.test_with_TTA(cfg, model))
