@@ -6,12 +6,14 @@ import matplotlib.pyplot as plt
 from detectron2.data import transforms as T
 from argparse import ArgumentParser
 from pathlib import Path
+import onnx
+import onnx_tensorrt.backend as backend
 
 import torch
 
 import detectron2.utils.comm as comm
 from detectron2.config import get_cfg
-from detectron2.engine import default_setup
+from detectron2.engine import default_setup, default_argument_parser
 
 from detectron2.projects.deeplab import add_deeplab_config
 from detectron2.utils.logger import setup_logger
@@ -63,24 +65,28 @@ def visualize_segmentation(mask):
     plt.show()
 
 
-parser = ArgumentParser()
-parser.add_argument('--model-dir', type=str)
-parser.add_argument('--image-path', type=str)
-args = parser.parse_args()
-
-
 if __name__ == '__main__':
+    args = default_argument_parser().parse_args()
     cfg = setup(args)
     # Load ONNX model
-    onnx_model_path = Path(args.model_dir) / 'model.onnx'
-    onnx_model = load_onnx_model(onnx_model_path)
+    model_type = 'resnet50'
+    onnx_model_path = Path(f'output_{model_type}') / 'model.onnx'
+    onnx_model = onnx.load(onnx_model_path)
+    onnx.checker.check_model(onnx_model)  # This will raise an error if the model is invalid
+
+    print('=' * 50)
+    for input_ in onnx_model.graph.input:
+            print(f'Input name: {input_.name}, Shape: {input_.shape}, Type: {input_.type}')
+    print('=' * 50)
+
+    engine = backend.prepare(onnx_model, device='cuda')
 
     # Load config (assuming `cfg` is set up in your script)
-    image_path = Path(args.image_path)
+    image_path = Path('datasets/cityscapes/leftImg8bit/test/berlin/berlin_000000_000019_leftImg8bit.png')
     input_tensor = preprocess_image(image_path, cfg)
 
     # Run inference
-    pred_masks = run_inference(onnx_model, input_tensor)
-
-    # Visualize first mask
-    visualize_segmentation(pred_masks[0])
+    # pred_masks = run_inference(onnx_model, input_tensor)
+    output = engine.run(input_tensor)
+    pred_mask = output[0]
+    visualize_segmentation(pred_mask)

@@ -298,7 +298,7 @@ def setup(args):
 
 def export_onnx(model, cfg):
     model.eval()
-    output_dir = './output_swin_t'
+    output_dir = './output_resnet50'
     save_path = os.path.join(output_dir, 'model.onnx')
 
     # Define input shape
@@ -361,7 +361,7 @@ def main(args):
             cfg.MODEL.WEIGHTS, resume=args.resume
         )
 
-        export_onnx_ = False  # needs to be changed manually
+        export_onnx_ = True  # needs to be changed manually
         if export_onnx_:
             export_onnx(model, cfg)
             return  # Exit after exporting ONNX model (for now)
