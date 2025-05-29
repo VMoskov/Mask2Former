@@ -58,21 +58,67 @@ class Transformer(nn.Module):
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
 
+    # def forward(self, src, mask, query_embed, pos_embed):  # original
+    #     # flatten NxCxHxW to HWxNxC
+    #     bs, c, h, w = src.shape
+    #     src = src.flatten(2).permute(2, 0, 1)
+    #     pos_embed = pos_embed.flatten(2).permute(2, 0, 1)
+    #     query_embed = query_embed.unsqueeze(1).repeat(1, bs, 1)
+    #     if mask is not None:
+    #         mask = mask.flatten(1)
+
+    #     tgt = torch.zeros_like(query_embed)
+    #     memory = self.encoder(src, src_key_padding_mask=mask, pos=pos_embed)
+    #     hs = self.decoder(
+    #         tgt, memory, memory_key_padding_mask=mask, pos=pos_embed, query_pos=query_embed
+    #     )
+    #     return hs.transpose(1, 2), memory.permute(1, 2, 0).view(bs, c, h, w)
     def forward(self, src, mask, query_embed, pos_embed):
-        # flatten NxCxHxW to HWxNxC
+        """
+        Args:
+            src: Tensor of shape [bs, c, h, w]
+            mask: Optional mask tensor [bs, h, w]
+            query_embed: Tensor of shape [num_queries, c]
+            pos_embed: Positional encoding tensor [bs, c, h, w]
+        Returns:
+            hs: Decoder output [num_layers, bs, c, num_queries]
+            memory: Encoder output [bs, c, h, w]
+        """
         bs, c, h, w = src.shape
-        src = src.flatten(2).permute(2, 0, 1)
-        pos_embed = pos_embed.flatten(2).permute(2, 0, 1)
-        query_embed = query_embed.unsqueeze(1).repeat(1, bs, 1)
+
+        # Flatten spatial dimensions to hw and rearrange to [bs, hw, c]
+        # src_flat = src.flatten(2).transpose(1, 2)  # [bs, hw, c]  # original
+        src_flat = src.flatten(2).permute(0, 2, 1).contiguous()  # [bs, hw, c]
+        pos_embed_flat = pos_embed.flatten(2).transpose(1, 2)  # [bs, hw, c]
+
+        # Transpose to [hw, bs, c] for encoder
+        # src_seq = src_flat.transpose(0, 1)  # [hw, bs, c]  # original
+        src_seq = src_flat.permute(1, 0, 2).contiguous()  # [hw, bs, c]
+        pos_seq = pos_embed_flat.transpose(0, 1)  # [hw, bs, c]
+
+        # Flatten mask to [bs, hw]
         if mask is not None:
             mask = mask.flatten(1)
 
+        # Expand query embeddings: [num_queries, bs, c]
+        query_embed = query_embed.unsqueeze(1).expand(-1, bs, -1)
         tgt = torch.zeros_like(query_embed)
-        memory = self.encoder(src, src_key_padding_mask=mask, pos=pos_embed)
-        hs = self.decoder(
-            tgt, memory, memory_key_padding_mask=mask, pos=pos_embed, query_pos=query_embed
-        )
-        return hs.transpose(1, 2), memory.permute(1, 2, 0).view(bs, c, h, w)
+
+        # Encoder
+        memory = self.encoder(src_seq, src_key_padding_mask=mask, pos=pos_seq)
+
+        # Decoder
+        hs = self.decoder(tgt, memory, memory_key_padding_mask=mask, pos=pos_seq, query_pos=query_embed)
+
+        # Instead of permuting memory back to [bs, c, h, w], reshape from [hw, bs, c] to [bs, h, w, c] and then to [bs, c, h, w]
+        # memory = memory.transpose(0, 1)  # [bs, hw, c]  # original
+        memory = memory.permute(1, 0, 2).contiguous()
+        memory = memory.view(bs, h, w, c).permute(0, 3, 1, 2).contiguous()  # [bs, c, h, w]
+
+        # hs: [num_layers, num_queries, bs, c] -> [num_layers, bs, c, num_queries]
+        hs = hs.permute(0, 2, 3, 1).contiguous()
+
+        return hs, memory
 
 
 class TransformerEncoder(nn.Module):

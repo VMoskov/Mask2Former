@@ -18,15 +18,15 @@ import torch.nn.functional as F
 from torch.autograd import Function
 from torch.autograd.function import once_differentiable
 
-try:
-    import MultiScaleDeformableAttention as MSDA
-except ModuleNotFoundError as e:
-    info_string = (
-        "\n\nPlease compile MultiScaleDeformableAttention CUDA op with the following commands:\n"
-        "\t`cd mask2former/modeling/pixel_decoder/ops`\n"
-        "\t`sh make.sh`\n"
-    )
-    raise ModuleNotFoundError(info_string)
+#try:
+#    import MultiScaleDeformableAttention as MSDA
+#except ModuleNotFoundError as e:
+#    info_string = (
+#        "\n\nPlease compile MultiScaleDeformableAttention CUDA op with the following commands:\n"
+#        "\t`cd mask2former/modeling/pixel_decoder/ops`\n"
+#        "\t`sh make.sh`\n"
+#    )
+#    raise ModuleNotFoundError(info_string)
 
 
 class MSDeformAttnFunction(Function):
@@ -49,24 +49,66 @@ class MSDeformAttnFunction(Function):
         return grad_value, None, None, grad_sampling_loc, grad_attn_weight, None
 
 
+# def ms_deform_attn_core_pytorch(value, value_spatial_shapes, sampling_locations, attention_weights):  # original
+#     # for debug and test only,
+#     # need to use cuda version instead
+#     N_, S_, M_, D_ = value.shape
+#     _, Lq_, M_, L_, P_, _ = sampling_locations.shape
+#     value_list = value.split([H_ * W_ for H_, W_ in value_spatial_shapes], dim=1)
+#     sampling_grids = 2 * sampling_locations - 1
+#     sampling_value_list = []
+#     for lid_, (H_, W_) in enumerate(value_spatial_shapes):
+#         # N_, H_*W_, M_, D_ -> N_, H_*W_, M_*D_ -> N_, M_*D_, H_*W_ -> N_*M_, D_, H_, W_
+#         value_l_ = value_list[lid_].flatten(2).transpose(1, 2).reshape(N_*M_, D_, H_, W_)
+#         # N_, Lq_, M_, P_, 2 -> N_, M_, Lq_, P_, 2 -> N_*M_, Lq_, P_, 2
+#         sampling_grid_l_ = sampling_grids[:, :, :, lid_].transpose(1, 2).flatten(0, 1)
+#         # N_*M_, D_, Lq_, P_
+#         sampling_value_l_ = F.grid_sample(value_l_, sampling_grid_l_,
+#                                           mode='bilinear', padding_mode='zeros', align_corners=False)
+#         sampling_value_list.append(sampling_value_l_)
+#     # (N_, Lq_, M_, L_, P_) -> (N_, M_, Lq_, L_, P_) -> (N_, M_, 1, Lq_, L_*P_)
+#     attention_weights = attention_weights.transpose(1, 2).reshape(N_*M_, 1, Lq_, L_*P_)
+#     output = (torch.stack(sampling_value_list, dim=-2).flatten(-2) * attention_weights).sum(-1).view(N_, M_*D_, Lq_)
+#     return output.transpose(1, 2).contiguous()
+
 def ms_deform_attn_core_pytorch(value, value_spatial_shapes, sampling_locations, attention_weights):
-    # for debug and test only,
-    # need to use cuda version instead
+    # value: [N_, S_, M_, D_]
+    # sampling_locations: [N_, Lq_, M_, L_, P_, 2]
+    # attention_weights: [N_, Lq_, M_, L_, P_]
+
     N_, S_, M_, D_ = value.shape
-    _, Lq_, M_, L_, P_, _ = sampling_locations.shape
-    value_list = value.split([H_ * W_ for H_, W_ in value_spatial_shapes], dim=1)
+    _, Lq_, _, L_, P_, _ = sampling_locations.shape
+
+    # Split value according to spatial shapes
+    split_sizes = [H_ * W_ for H_, W_ in value_spatial_shapes]
+    value_list = torch.split(value, split_sizes, dim=1)
+
     sampling_grids = 2 * sampling_locations - 1
+
     sampling_value_list = []
+    offset = 0
     for lid_, (H_, W_) in enumerate(value_spatial_shapes):
-        # N_, H_*W_, M_, D_ -> N_, H_*W_, M_*D_ -> N_, M_*D_, H_*W_ -> N_*M_, D_, H_, W_
-        value_l_ = value_list[lid_].flatten(2).transpose(1, 2).reshape(N_*M_, D_, H_, W_)
-        # N_, Lq_, M_, P_, 2 -> N_, M_, Lq_, P_, 2 -> N_*M_, Lq_, P_, 2
-        sampling_grid_l_ = sampling_grids[:, :, :, lid_].transpose(1, 2).flatten(0, 1)
-        # N_*M_, D_, Lq_, P_
-        sampling_value_l_ = F.grid_sample(value_l_, sampling_grid_l_,
-                                          mode='bilinear', padding_mode='zeros', align_corners=False)
-        sampling_value_list.append(sampling_value_l_)
-    # (N_, Lq_, M_, L_, P_) -> (N_, M_, Lq_, L_, P_) -> (N_, M_, 1, Lq_, L_*P_)
-    attention_weights = attention_weights.transpose(1, 2).reshape(N_*M_, 1, Lq_, L_*P_)
-    output = (torch.stack(sampling_value_list, dim=-2).flatten(-2) * attention_weights).sum(-1).view(N_, M_*D_, Lq_)
-    return output.transpose(1, 2).contiguous()
+        value_l = value_list[lid_]  # [N_, H_*W_, M_, D_]
+        value_l = value_l.permute(0, 2, 3, 1).contiguous()  # [N_, M_, D_, H_*W_]
+
+        value_l = value_l.reshape(N_ * M_, D_, H_, W_)  # [N_*M_, D_, H_, W_]
+
+        sampling_grid_l = sampling_grids[:, :, :, lid_]  # [N_, Lq_, M_, P_, 2]
+        sampling_grid_l = sampling_grid_l.permute(0, 2, 1, 3, 4).contiguous()  # [N_, M_, Lq_, P_, 2]
+        sampling_grid_l = sampling_grid_l.reshape(N_ * M_, Lq_, P_, 2)  # [N_*M_, Lq_, P_, 2]
+
+        sampled = F.grid_sample(value_l, sampling_grid_l,
+                                mode='bilinear', padding_mode='zeros', align_corners=False)  # [N_*M_, D_, Lq_, P_]
+
+        sampling_value_list.append(sampled)
+
+    sampling_values = torch.stack(sampling_value_list, dim=3)  # [N_*M_, D_, Lq_, L_, P_]
+    sampling_values = sampling_values.flatten(3)  # [N_*M_, D_, Lq_, L_*P_]
+
+    attention_weights = attention_weights.permute(0, 2, 1, 3, 4).contiguous()  # [N_, M_, Lq_, L_, P_]
+    attention_weights = attention_weights.reshape(N_ * M_, 1, Lq_, L_ * P_)  # [N_*M_, 1, Lq_, L_*P_]
+
+    output = (sampling_values * attention_weights).sum(-1)  # [N_*M_, D_, Lq_]
+    output = output.reshape(N_, M_ * D_, Lq_)  # [N_, M_*D_, Lq_]
+
+    return output.permute(0, 2, 1).contiguous()  # [N_, Lq_, M_*D_]

@@ -362,6 +362,7 @@ class MultiScaleMaskedTransformerDecoder(nn.Module):
 
     def forward(self, x, mask_features, mask = None):
         # x is a list of multi-scale feature
+        device = "cuda"
         assert len(x) == self.num_feature_levels
         src = []
         pos = []
@@ -395,7 +396,14 @@ class MultiScaleMaskedTransformerDecoder(nn.Module):
 
         for i in range(self.num_layers):
             level_index = i % self.num_feature_levels
-            attn_mask[torch.where(attn_mask.sum(-1) == attn_mask.shape[-1])] = False
+            # attn_mask = mask_out_rows(attn_mask)
+            row_sums = attn_mask.sum(-1)
+            row_mask = row_sums == attn_mask.shape[-1]
+            row_mask = row_mask
+            # attn_mask = torch.where(row_mask.unsqueeze(-1), torch.tensor(False).to(device), attn_mask)
+            # attn_mask = attn_mask.masked_fill(row_mask.unsqueeze(-1), 0)
+            attn_mask = attn_mask & ~row_mask.unsqueeze(-1)  # FIXME
+            # attn_mask[torch.where(attn_mask.sum(-1) == attn_mask.shape[-1])] = False  # original
             # attention: cross-attention first
             output = self.transformer_cross_attention_layers[i](
                 output, src[level_index],
@@ -432,7 +440,8 @@ class MultiScaleMaskedTransformerDecoder(nn.Module):
 
     def forward_prediction_heads(self, output, mask_features, attn_mask_target_size):
         decoder_output = self.decoder_norm(output)
-        decoder_output = decoder_output.transpose(0, 1)
+        # decoder_output = decoder_output.transpose(0, 1)  # original
+        decoder_output = decoder_output.permute(1, 0, 2).contiguous()
         outputs_class = self.class_embed(decoder_output)
         mask_embed = self.mask_embed(decoder_output)
         outputs_mask = torch.einsum("bqc,bchw->bqhw", mask_embed, mask_features)
@@ -442,7 +451,7 @@ class MultiScaleMaskedTransformerDecoder(nn.Module):
         attn_mask = F.interpolate(outputs_mask, size=attn_mask_target_size, mode="bilinear", align_corners=False)
         # must use bool type
         # If a BoolTensor is provided, positions with ``True`` are not allowed to attend while ``False`` values will be unchanged.
-        attn_mask = (attn_mask.sigmoid().flatten(2).unsqueeze(1).repeat(1, self.num_heads, 1, 1).flatten(0, 1) < 0.5).bool()
+        attn_mask = (attn_mask.sigmoid().flatten(2).unsqueeze(1).repeat(1, self.num_heads, 1, 1).flatten(0, 1) < 0.5).bool()  # original
         attn_mask = attn_mask.detach()
 
         return outputs_class, outputs_mask, attn_mask
@@ -459,3 +468,17 @@ class MultiScaleMaskedTransformerDecoder(nn.Module):
             ]
         else:
             return [{"pred_masks": b} for b in outputs_seg_masks[:-1]]
+
+
+def mask_out_rows(attn_mask):
+    row_sums = attn_mask.sum(-1)
+
+    # Create a boolean mask indicating which rows are completely filled with True values
+    row_mask = row_sums == attn_mask.shape[-1]
+
+    for i in range(attn_mask.shape[0]):
+        for j in range(attn_mask.shape[1]):
+            if row_mask[i, j]:
+                attn_mask[i, j] = False
+
+    return attn_mask

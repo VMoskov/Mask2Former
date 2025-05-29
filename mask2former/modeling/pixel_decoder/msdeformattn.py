@@ -9,6 +9,7 @@ from torch import nn
 from torch.nn import functional as F
 from torch.nn.init import xavier_uniform_, constant_, uniform_, normal_
 from torch.cuda.amp import autocast
+from einops import rearrange
 
 from detectron2.config import configurable
 from detectron2.layers import Conv2d, ShapeSpec, get_norm
@@ -69,9 +70,13 @@ class MSDeformAttnTransformerEncoderOnly(nn.Module):
             bs, c, h, w = src.shape
             spatial_shape = (h, w)
             spatial_shapes.append(spatial_shape)
-            src = src.flatten(2).transpose(1, 2)
+            # src = src.flatten(2).transpose(1, 2)  # original
+            # src = src.permute(0, 2, 3, 1).reshape(bs, h * w, c)  # original2
+            src = src.permute(0, 2, 3, 1).contiguous().reshape(bs, h * w, c)  # [bs, h * w, c]
             mask = mask.flatten(1)
-            pos_embed = pos_embed.flatten(2).transpose(1, 2)
+            # pos_embed = pos_embed.flatten(2).transpose(1, 2)  # original
+            # pos_embed = pos_embed.permute(0, 2, 3, 1).reshape(bs, h * w, c)  # original2
+            pos_embed = pos_embed.permute(0, 2, 3, 1).contiguous().reshape(bs, h * w, c)  # [bs, h * w, c]
             lvl_pos_embed = pos_embed + self.level_embed[lvl].view(1, 1, -1)
             lvl_pos_embed_flatten.append(lvl_pos_embed)
             src_flatten.append(src)
@@ -335,8 +340,11 @@ class MSDeformAttnPixelDecoder(nn.Module):
         out = []
         multi_scale_features = []
         num_cur_levels = 0
+
         for i, z in enumerate(y):
-            out.append(z.transpose(1, 2).view(bs, -1, spatial_shapes[i][0], spatial_shapes[i][1]))
+            # out.append(z.transpose(1, 2).view(bs, -1, spatial_shapes[i][0], spatial_shapes[i][1]))  # original
+            h, w = spatial_shapes[i]
+            out.append(rearrange(z, 'b (h w) c -> b c h w', h=h, w=w))
 
         # append `out` with extra FPN levels
         # Reverse feature maps into top-down order (from low to high resolution)

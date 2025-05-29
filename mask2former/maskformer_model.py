@@ -190,6 +190,8 @@ class MaskFormer(nn.Module):
                     segments_info (list[dict]): Describe each segment in `panoptic_seg`.
                         Each dict contains keys "id", "category_id", "isthing".
         """
+        if torch.is_tensor(batched_inputs):
+            batched_inputs = [{'image': batched_inputs}]
         images = [x["image"].to(self.device) for x in batched_inputs]
         images = [(x - self.pixel_mean) / self.pixel_std for x in images]
         images = ImageList.from_tensors(images, self.size_divisibility)
@@ -257,7 +259,9 @@ class MaskFormer(nn.Module):
                 # instance segmentation inference
                 if self.instance_on:
                     instance_r = retry_if_cuda_oom(self.instance_inference)(mask_cls_result, mask_pred_result)
-                    processed_results[-1]["instances"] = instance_r
+                    processed_results[-1]["instances"] = instance_r.get_fields()
+                    processed_results[-1]["instances"]["pred_boxes"] = processed_results[-1]["instances"]["pred_boxes"].tensor
+                    #processed_results[-1]["instances"] = instance_r
 
             return processed_results
 
@@ -365,6 +369,12 @@ class MaskFormer(nn.Module):
             scores_per_image = scores_per_image[keep]
             labels_per_image = labels_per_image[keep]
             mask_pred = mask_pred[keep]
+            # scores_per_image = boolean_select(scores_per_image, keep)
+            # labels_per_image = boolean_select(labels_per_image, keep)
+            # mask_pred = boolean_select(mask_pred, keep)
+            # scores_per_image = torch.masked_select(scores_per_image, keep)
+            # labels_per_image = torch.masked_select(labels_per_image, keep)
+            # mask_pred = torch.masked_select(mask_pred, keep)
 
         result = Instances(image_size)
         # mask (before sigmoid)
@@ -378,3 +388,11 @@ class MaskFormer(nn.Module):
         result.scores = scores_per_image * mask_scores_per_image
         result.pred_classes = labels_per_image
         return result
+
+
+def boolean_select(input_tensor, keep):
+    output = []
+    for i, el in enumerate(input_tensor):
+        if keep[i]:
+            output.append(el)
+    return torch.stack(output, dim=0) if len(output) > 0 else input_tensor
