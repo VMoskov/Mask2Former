@@ -51,3 +51,7 @@ _darcs
 /projects/*/datasets
 /models
 /snippet
+
+output_*
+dmg_control.py
+conclusions.txt
